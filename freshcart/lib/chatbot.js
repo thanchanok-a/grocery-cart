@@ -1,32 +1,80 @@
-// The shop assistant. Two modes:
+// The Thai Grocery shop assistant. Two modes:
 //  1. AI mode (ANTHROPIC_API_KEY set): Claude answers, using "tools" that read your real
-//     catalog, delivery slots and orders, so it never invents prices or stock.
-//  2. Offline mode (no key): simple keyword rules, so the chat still works while you develop.
+//     catalog, recipes, delivery slots and orders, so it never invents prices or stock.
+//  2. Basic mode (no key): keyword rules in English and Thai, so the chat still works.
 import Anthropic from "@anthropic-ai/sdk";
-import { searchProducts, getProduct, CATEGORIES, formatPrice } from "@/lib/catalog";
+import { searchProducts, getProduct, getAllProducts, CATEGORIES, formatPrice } from "@/lib/catalog";
 import { getOrder, getDeliverySlots, FREE_DELIVERY_OVER, DELIVERY_FEE } from "@/lib/orders";
 
-const STORE_NAME = "FreshCart";
+// ---------- Change these to match your shop ----------
+const STORE_NAME = "Thai Grocery";
+const SUPPORT_EMAIL = "support@thaigrocery.example";
+
+// ---------- Thai dishes the assistant can shop for ----------
+// "ids" are product ids from data/products.js. Add your own dishes here.
+const RECIPES = [
+  { name: "Pad Thai", thai: "ผัดไทย", keys: ["pad thai", "padthai", "ผัดไทย"], ids: ["t26", "t21", "t20", "t13", "t33", "t34", "t35", "t12", "t9", "t6"] },
+  { name: "Green Curry", thai: "แกงเขียวหวาน", keys: ["green curry", "gaeng keow wan", "แกงเขียวหวาน", "แกงเขียว"], ids: ["t15", "t19", "t30", "t8", "t1", "t5", "t13", "t20", "t24"] },
+  { name: "Red Curry", thai: "แกงเผ็ด", keys: ["red curry", "แกงเผ็ด"], ids: ["t16", "t19", "t30", "t8", "t1", "t5", "t13", "t20", "t24"] },
+  { name: "Massaman Curry", thai: "แกงมัสมั่น", keys: ["massaman", "มัสมั่น"], ids: ["t17", "t19", "t30", "t7", "t20", "t21", "t13", "t24"] },
+  { name: "Tom Yum Goong", thai: "ต้มยำกุ้ง", keys: ["tom yum", "tom yam", "ต้มยำ"], ids: ["t33", "t18", "t3", "t4", "t5", "t6", "t9", "t13"] },
+  { name: "Tom Kha Gai", thai: "ต้มข่าไก่", keys: ["tom kha", "ต้มข่า"], ids: ["t30", "t19", "t4", "t3", "t5", "t6", "t9", "t13"] },
+  { name: "Pad Kra Pao", thai: "ผัดกะเพรา", keys: ["kra pao", "krapow", "kaprao", "gaprao", "basil stir fry", "กะเพรา", "กระเพรา"], ids: ["t32", "t2", "t6", "t14", "t13", "t35", "t24"] },
+  { name: "Som Tam", thai: "ส้มตำ", keys: ["som tam", "papaya salad", "ส้มตำ"], ids: ["t10", "t6", "t9", "t13", "t20", "t25"] },
+  { name: "Mango Sticky Rice", thai: "ข้าวเหนียวมะม่วง", keys: ["mango sticky rice", "ข้าวเหนียวมะม่วง"], ids: ["t11", "t25", "t19", "t20"] },
+  { name: "Thai Iced Tea", thai: "ชาเย็น", keys: ["thai tea", "iced tea", "cha yen", "ชาเย็น", "ชาไทย"], ids: ["t40", "t41"] },
+];
+
+function findRecipe(text) {
+  const t = String(text || "").toLowerCase();
+  return RECIPES.find((r) => r.keys.some((k) => t.includes(k))) || null;
+}
+
+function recipeProducts(recipe) {
+  return recipe.ids.map(getProduct).filter(Boolean);
+}
+
+// Thai text has no spaces, so match product Thai names directly.
+const THAI = /[฀-๿]/;
+function searchThai(text) {
+  const t = String(text || "");
+  return getAllProducts().filter((p) => {
+    const m = p.name.match(/\(([^)]*[฀-๿][^)]*)\)/); // Thai name inside ( )
+    if (!m) return false;
+    const thaiName = m[1].trim();
+    return t.includes(thaiName) || (thaiName.length >= 2 && t.length >= 2 && thaiName.includes(t.replace(/[^฀-๿]/g, "")));
+  });
+}
 
 // ---------- Tools the AI can call ----------
 const TOOLS = [
   {
     name: "search_products",
     description:
-      "Search the store catalog. Use for any question about what we sell, prices, stock, or ingredients for a recipe (search each ingredient separately).",
+      "Search the store catalog. Use for any question about what we sell, prices, stock, or ingredients (search each ingredient separately, in English, e.g. 'fish sauce', 'galangal').",
     input_schema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Keywords, e.g. 'oat milk' or 'pasta'" },
+        query: { type: "string", description: "English keywords, e.g. 'coconut milk' or 'green curry paste'" },
         category: { type: "string", enum: CATEGORIES, description: "Optional category filter" },
       },
       required: ["query"],
     },
   },
   {
+    name: "get_recipe_ingredients",
+    description:
+      "Get the ingredients we sell for a Thai dish (e.g. Pad Thai, Green Curry, Tom Yum, Som Tam, Pad Kra Pao, Massaman, Mango Sticky Rice, Thai Iced Tea). Use this first for recipe questions.",
+    input_schema: {
+      type: "object",
+      properties: { dish: { type: "string", description: "Dish name in English or Thai" } },
+      required: ["dish"],
+    },
+  },
+  {
     name: "add_to_cart",
     description:
-      "Add a product to the customer's cart. Only call when the customer clearly asks to add/buy something. Use a product_id returned by search_products.",
+      "Add a product to the customer's cart. Only call when the customer clearly asks to add/buy something. Use a product_id from a previous tool result.",
     input_schema: {
       type: "object",
       properties: {
@@ -63,6 +111,13 @@ function runTool(name, input, ctx) {
       const results = searchProducts(input.query, { category: input.category, limit: 8 });
       results.forEach((p) => ctx.products.set(p.id, p));
       return results.length ? results.map(publicProduct) : { message: "No matching products." };
+    }
+    case "get_recipe_ingredients": {
+      const r = findRecipe(input.dish);
+      if (!r) return { found: false, message: "No saved recipe. Use search_products for each ingredient instead." };
+      const items = recipeProducts(r);
+      items.forEach((p) => ctx.products.set(p.id, p));
+      return { found: true, dish: `${r.name} (${r.thai})`, ingredients_we_sell: items.map(publicProduct) };
     }
     case "add_to_cart": {
       const p = getProduct(input.product_id);
@@ -103,16 +158,21 @@ function systemPrompt(cart) {
         .join("\n")
     : "(empty)";
 
-  return `You are the friendly shopping assistant for ${STORE_NAME}, an online grocery store.
+  return `You are "Nong" (น้อง), the warm and helpful shopping assistant for ${STORE_NAME}, an online Thai grocery store.
+
+Personality:
+- Friendly Thai hospitality: polite, cheerful, a little playful. Greet with "สวัสดีค่ะ 🙏" and thank with "ขอบคุณค่ะ".
+- You love Thai food and give practical home-cooking tips (spice level, substitutions, how to store fresh herbs).
+- Reply in the customer's language: if they write in Thai, answer in Thai; otherwise answer in English with a touch of Thai.
 
 Rules:
 - Only state prices, stock and product names that come from tool results. Never invent products.
-- If something is out of stock or not sold, say so and suggest the closest alternative from search results.
-- For recipe or meal ideas, search for each ingredient and tell the customer which ones we carry.
+- For a Thai dish, call get_recipe_ingredients first, then list what we carry with prices and mention anything we don't stock.
+- If something is out of stock, say so kindly and suggest the closest alternative from search results.
 - Only add items to the cart when the customer asks you to.
 - Delivery costs ${formatPrice(DELIVERY_FEE)}, free on orders over ${formatPrice(FREE_DELIVERY_OVER)}.
-- For refunds, complaints or anything you can't handle, ask them to email support@freshcart.example.
-- Keep replies short (1–4 sentences or a short list). Plain text, no markdown headings.
+- For refunds, complaints or anything you can't handle, ask them to email ${SUPPORT_EMAIL}.
+- Keep replies short (1–5 sentences or a short list). Plain text, a few emoji are fine, no markdown headings.
 
 The customer's current cart:
 ${cartText}`;
@@ -137,7 +197,7 @@ async function aiReply(messages, cart) {
   for (let step = 0; step < 6; step++) {
     const res = await client.messages.create({
       model,
-      max_tokens: 800,
+      max_tokens: 900,
       system: systemPrompt(cart),
       tools: TOOLS,
       messages: convo,
@@ -145,7 +205,7 @@ async function aiReply(messages, cart) {
 
     if (res.stop_reason !== "tool_use") {
       const reply = res.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-      return finish(reply || "Sorry, I didn't catch that. Could you rephrase?", ctx);
+      return finish(reply || "ขอโทษค่ะ, I didn't catch that. Could you say it another way? 🙏", ctx);
     }
 
     convo.push({ role: "assistant", content: res.content });
@@ -158,72 +218,116 @@ async function aiReply(messages, cart) {
       }));
     convo.push({ role: "user", content: results });
   }
-  return finish("Sorry, that took too many steps. Could you ask in a simpler way?", ctx);
+  return finish("ขอโทษค่ะ, that was a bit too much for me. Could you ask in a simpler way? 🙏", ctx);
 }
 
-function finish(reply, ctx) {
-  return { reply, products: [...ctx.products.values()].slice(0, 6), actions: ctx.actions };
+function finish(reply, ctx, limit = 6) {
+  return { reply, products: [...ctx.products.values()].slice(0, limit), actions: ctx.actions };
 }
 
-// ---------- Offline fallback (no API key) ----------
+// ---------- Basic mode (no API key): English + Thai keywords ----------
 export function offlineReply(messages) {
   const last = [...messages].reverse().find((m) => m.role === "user");
   const text = (last?.content || "").trim();
   const lower = text.toLowerCase();
+  const isThai = THAI.test(text);
   const ctx = { products: new Map(), actions: [] };
 
+  // Order lookup
   const orderMatch = text.match(/\bFC[A-Z0-9]{4,}\b/i);
   if (orderMatch) {
     const o = getOrder(orderMatch[0]);
     return finish(
       o
-        ? `Order ${o.id} is "${o.status}". Delivery slot: ${o.slot}. Total ${formatPrice(o.total)}.`
-        : `I couldn't find order ${orderMatch[0].toUpperCase()}. Please check the number on your confirmation page.`,
+        ? isThai
+          ? `ออเดอร์ ${o.id} สถานะ: "${o.status}" 📦 รอบส่ง: ${o.slot} ยอดรวม ${formatPrice(o.total)} ค่ะ`
+          : `Order ${o.id} is "${o.status}" 📦 Delivery slot: ${o.slot}. Total ${formatPrice(o.total)}.`
+        : isThai
+          ? `ขอโทษค่ะ ไม่พบออเดอร์ ${orderMatch[0].toUpperCase()} กรุณาตรวจสอบเลขที่หน้ายืนยันคำสั่งซื้อนะคะ`
+          : `Sorry, I couldn't find order ${orderMatch[0].toUpperCase()}. Please check the number on your confirmation page 🙏`,
       ctx
     );
   }
-  if (/\b(order|track|where)\b/.test(lower) && /\b(my|order)\b/.test(lower)) {
-    return finish("Sure! What's your order number? It starts with FC and is on your confirmation page.", ctx);
-  }
-  if (/\b(deliver|delivery|slot|when)\b/.test(lower)) {
-    const slots = getDeliverySlots().slice(0, 4).join("; ");
+  if ((/\b(order|track)\b/.test(lower) && /\b(my|where|status)\b/.test(lower)) || /ออเดอร์|คำสั่งซื้อ|ของถึง/.test(text)) {
     return finish(
-      `Next delivery slots: ${slots}. Delivery is ${formatPrice(DELIVERY_FEE)}, free over ${formatPrice(FREE_DELIVERY_OVER)}.`,
-      ctx
-    );
-  }
-  if (/^(hi|hello|hey|help)\b/.test(lower) || !text) {
-    return finish(
-      "Hi! I can find products, check prices and stock, add items to your cart, show delivery slots, or track an order. Try \"add 2 bananas\" or \"do you have oat milk?\"",
+      isThai
+        ? "ได้เลยค่ะ ขอเลขออเดอร์หน่อยนะคะ (ขึ้นต้นด้วย FC อยู่ที่หน้ายืนยันคำสั่งซื้อ) 🙏"
+        : "Of course! What's your order number? It starts with FC and is on your confirmation page 🙏",
       ctx
     );
   }
 
+  // Delivery
+  if (/\b(deliver|delivery|slot|shipping)\b/.test(lower) || /ส่ง|จัดส่ง/.test(text)) {
+    const slots = getDeliverySlots().slice(0, 4).join("; ");
+    return finish(
+      isThai
+        ? `รอบส่งถัดไป 🛵 ${slots} ค่าส่ง ${formatPrice(DELIVERY_FEE)} ส่งฟรีเมื่อซื้อครบ ${formatPrice(FREE_DELIVERY_OVER)} ค่ะ`
+        : `Next delivery slots 🛵 ${slots}. Delivery is ${formatPrice(DELIVERY_FEE)}, free over ${formatPrice(FREE_DELIVERY_OVER)}.`,
+      ctx
+    );
+  }
+
+  // Greeting / help
+  if (!text || /^(hi|hello|hey|help|sawasdee)\b/.test(lower) || /^สวัสดี/.test(text)) {
+    return finish(
+      isThai
+        ? "สวัสดีค่ะ 🙏 น้องช่วยหาสินค้า เช็คราคา ใส่ตะกร้า ดูรอบส่ง หรือแนะนำวัตถุดิบทำอาหารไทยได้นะคะ ลองพิมพ์ \"ผัดไทย\" หรือ \"มีน้ำปลาไหม\" ค่ะ"
+        : "สวัสดีค่ะ 🙏 I can find Thai ingredients, check prices, add items to your cart, show delivery times, or tell you what you need for a dish. Try \"what do I need for green curry?\" or \"add 2 coconut milk\".",
+      ctx
+    );
+  }
+
+  // Add to cart: "add 2 coconut milk"
   const addMatch = lower.match(/^(?:please\s+)?(?:add|buy|get me)\s+(\d+)?\s*(?:x\s*)?(.+)$/);
   if (addMatch) {
     const qty = Math.max(1, Math.min(20, Number(addMatch[1]) || 1));
-    const [p] = searchProducts(addMatch[2], { limit: 1 });
-    if (!p) return finish(`Sorry, I couldn't find "${addMatch[2]}".`, ctx);
+    const [p] = THAI.test(addMatch[2]) ? searchThai(addMatch[2]) : searchProducts(addMatch[2], { limit: 1 });
+    if (!p) return finish(`Sorry, I couldn't find "${addMatch[2]}" 🙏 Try another name, like "fish sauce" or "jasmine rice".`, ctx);
     runTool("add_to_cart", { product_id: p.id, quantity: qty }, ctx);
     return finish(
       p.stock >= qty
-        ? `Added ${qty} x ${p.name} to your cart (${formatPrice(p.price)} each).`
+        ? `Added ${qty} x ${p.name} to your cart 🛒 (${formatPrice(p.price)} each). ขอบคุณค่ะ!`
         : p.stock === 0
-          ? `Sorry, ${p.name} is out of stock right now.`
+          ? `Sorry, ${p.name} is out of stock right now 😢`
           : `Sorry, we only have ${p.stock} of ${p.name} right now.`,
       ctx
     );
   }
 
-  const results = searchProducts(text, { limit: 6 });
+  // Thai dishes: "what do I need for pad thai?" / "ผัดไทย"
+  const recipe = findRecipe(text);
+  if (recipe) {
+    const items = recipeProducts(recipe);
+    items.forEach((p) => ctx.products.set(p.id, p));
+    if (!items.length) return finish(`${recipe.name} (${recipe.thai}) sounds delicious! 😋 Search for each ingredient and I'll help you find them.`, ctx);
+    const inStock = items.filter((p) => p.stock > 0);
+    const out = items.filter((p) => p.stock === 0);
+    const total = inStock.reduce((s, p) => s + p.price, 0);
+    let reply = isThai
+      ? `ทำ${recipe.thai}ใช้วัตถุดิบเหล่านี้ค่ะ 😋 ${inStock.map((p) => p.name).join(", ")} รวมประมาณ ${formatPrice(total)} กด Add เพื่อใส่ตะกร้าได้เลยค่ะ`
+      : `For ${recipe.name} (${recipe.thai}) 😋 you'll need: ${inStock.map((p) => `${p.name} ${formatPrice(p.price)}`).join(", ")}. About ${formatPrice(total)} in total. Tap "Add" below to put them in your cart!`;
+    if (out.length) reply += isThai ? ` (หมดชั่วคราว: ${out.map((p) => p.name).join(", ")})` : ` Currently out of stock: ${out.map((p) => p.name).join(", ")}.`;
+    return finish(reply, ctx, 10);
+  }
+
+  // Product search (Thai or English)
+  const results = isThai ? searchThai(text).slice(0, 6) : searchProducts(text, { limit: 6 });
   results.forEach((p) => ctx.products.set(p.id, p));
   if (!results.length) {
-    return finish("I couldn't find a match. Try a simpler word like \"milk\", \"pasta\" or \"snacks\".", ctx);
+    return finish(
+      isThai
+        ? "ขอโทษค่ะ ไม่เจอสินค้านี้ ลองพิมพ์ชื่ออื่น เช่น \"น้ำปลา\" \"กะทิ\" หรือ \"ข้าวหอมมะลิ\" นะคะ 🙏"
+        : "Sorry, I couldn't find that 🙏 Try a simpler word like \"curry paste\", \"rice noodles\" or \"coconut milk\".",
+      ctx
+    );
   }
   const inStock = results.filter((p) => p.stock > 0);
   const out = results.filter((p) => p.stock === 0);
-  let reply = `Here's what I found: ${inStock.map((p) => `${p.name} ${formatPrice(p.price)}`).join(", ") || "nothing in stock"}.`;
-  if (out.length) reply += ` Currently out of stock: ${out.map((p) => p.name).join(", ")}.`;
+  let reply = isThai
+    ? `มีค่ะ 😊 ${inStock.map((p) => `${p.name} ${formatPrice(p.price)}`).join(", ") || "แต่ตอนนี้หมดชั่วคราวค่ะ"}`
+    : `Here's what we have 😊 ${inStock.map((p) => `${p.name} ${formatPrice(p.price)}`).join(", ") || "nothing in stock right now"}.`;
+  if (out.length) reply += isThai ? ` (หมดชั่วคราว: ${out.map((p) => p.name).join(", ")})` : ` Out of stock: ${out.map((p) => p.name).join(", ")}.`;
   return finish(reply, ctx);
 }
 
