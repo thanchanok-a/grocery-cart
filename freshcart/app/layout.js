@@ -4,8 +4,8 @@ import Header from "@/components/Header";
 import ChatWidget from "@/components/ChatWidget";
 
 export const metadata = {
-  title: "FreshCart – Online Grocery",
-  description: "Fresh groceries delivered, with an AI shopping assistant.",
+  title: "DMV Thai Grocery",
+  description: "Authentic Thai ingredients delivered to your door: curry pastes, fresh herbs, jasmine rice and Thai snacks.",
 };
 
 export default function RootLayout({ children }) {
@@ -15,7 +15,7 @@ export default function RootLayout({ children }) {
         <CartProvider>
           <Header />
           <main className="container main">{children}</main>
-          <footer className="footer container">© {new Date().getFullYear()} FreshCart · Demo store</footer>
+          <footer className="footer container">© {new Date().getFullYear()} Thai Grocery · DMV · Authentic Thai ingredients</footer>
           <ChatWidget />
         </CartProvider>
       </body>
