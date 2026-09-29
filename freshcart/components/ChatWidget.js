@@ -5,10 +5,10 @@ import ProductCard from "@/components/ProductCard";
 
 const GREETING = {
   role: "assistant",
-  content: "Hi! I'm the FreshCart assistant 👋 Ask me about products, prices, delivery, or your order.",
+  content: "สวัสดีค่ะ 🙏 I'm Nong, your Thai Grocery helper! Ask me about ingredients, Thai recipes, delivery, or your order. พิมพ์ภาษาไทยได้นะคะ",
 };
 
-const SUGGESTIONS = ["Do you have oat milk?", "Ingredients for spaghetti bolognese", "Add 2 bananas", "When can you deliver?"];
+const SUGGESTIONS = ["What do I need for Pad Thai?", "Green curry ingredients", "มีน้ำปลาไหม", "Add 2 coconut milk", "When can you deliver?"];
 
 export default function ChatWidget() {
   const { items, add } = useCart();
@@ -61,7 +61,7 @@ export default function ChatWidget() {
         <div className="chat-panel" role="dialog" aria-label="Shopping assistant">
           <div className="chat-head">
             <div>
-              <strong>FreshCart Assistant</strong>
+              <strong>🪷 Nong · Thai Grocery Helper</strong>
               {mode === "offline" && <div className="chat-mode">Basic mode · add an API key for full AI</div>}
             </div>
             <button className="icon-btn" onClick={() => setOpen(false)} aria-label="Close chat">✕</button>
@@ -111,7 +111,7 @@ export default function ChatWidget() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask about products, delivery…"
+              placeholder="Ask about ingredients, recipes… / ถามได้เลยค่ะ"
               maxLength={500}
             />
             <button className="btn" disabled={loading || !input.trim()}>
